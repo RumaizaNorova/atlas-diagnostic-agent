@@ -12,7 +12,7 @@ async def _call_claude(prompt: str, max_tokens: int = 1024) -> str:
         response = await client.post(
             ANTHROPIC_API_URL,
             headers={
-                "x-api-key": os.environ.get("ANTHROPIC_API_KEY", ""),
+                "x-api-key": os.environ.get("ANTHROPIC_API_KEY", "").strip(),
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
