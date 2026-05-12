@@ -2,6 +2,6 @@ mcp[cli]
 fastapi
 uvicorn[standard]
 httpx
-google-genai
+anthropic
 PyJWT
 python-dotenv

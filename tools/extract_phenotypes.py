@@ -1,13 +1,12 @@
 import json
 import os
 
-from google import genai
-from google.genai import types
+import anthropic
 from mcp.server.fastmcp import Context
 
 
 def _get_client():
-    return genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+    return anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
 async def extract_phenotype_signals(
@@ -61,15 +60,18 @@ Return ONLY a valid JSON object (no markdown, no explanation):
 }}"""
 
     client = _get_client()
-    response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
 
-    text = response.text.strip()
+    text = message.content[0].text.strip()
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1] if len(parts) > 1 else text
         if text.startswith("json"):
-            text = text[4:]
-    text = text.strip()
+            text = text[4:].strip()
 
     try:
         return json.loads(text)
@@ -77,5 +79,5 @@ Return ONLY a valid JSON object (no markdown, no explanation):
         return {
             "hpo_terms": [],
             "clinical_summary": text,
-            "parse_error": "Could not parse structured HPO terms from LLM response",
+            "parse_error": "Could not parse structured HPO terms",
         }

@@ -2,7 +2,7 @@ import json
 import os
 from typing import Annotated
 
-from google import genai
+import anthropic
 from mcp.server.fastmcp import Context
 from pydantic import Field
 
@@ -13,7 +13,7 @@ from tools.match_rare_diseases import match_rare_diseases
 
 
 def _get_client():
-    return genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+    return anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
 async def run_atlas_analysis(
@@ -34,30 +34,29 @@ async def run_atlas_analysis(
     if not patientId and ctx:
         patientId = get_patient_id_if_context_exists(ctx)
 
-    # Step 1 — longitudinal FHIR history
     history = await get_patient_longitudinal_history(patientId=patientId, ctx=ctx)
     if "error" in history:
         return {"error": history["error"]}
 
-    # Step 2 — phenotype extraction
     phenotypes = await extract_phenotype_signals(patient_history=history, ctx=ctx)
 
-    # Step 3 — rare disease matching
     disease_matches = await match_rare_diseases(
         hpo_terms=phenotypes.get("hpo_terms", []),
         ctx=ctx,
     )
 
-    # Step 4 — synthesise diagnostic report
+    conditions = history.get("conditions", [])
+    abnormal_obs = [o for o in history.get("observations", []) if o.get("abnormal")]
+    onset_dates = sorted([c.get("onset", "") for c in conditions if c.get("onset")])
+
     conditions_text = "\n".join(
         f"- {c['display']} (onset: {c.get('onset', 'unknown')})"
-        for c in history.get("conditions", [])
+        for c in conditions
     ) or "None documented"
 
     abnormal_text = "\n".join(
         f"- {o['name']}: {o['value']} (flag: {o['interpretation']}, date: {o['date']})"
-        for o in history.get("observations", [])
-        if o.get("abnormal")
+        for o in abnormal_obs
     )[:2000] or "None documented"
 
     top_matches_text = "\n".join(
@@ -66,14 +65,6 @@ async def run_atlas_analysis(
     ) or "No strong matches found"
 
     phenotype_summary = phenotypes.get("clinical_summary", "")
-
-    # Estimate diagnostic delay from earliest onset
-    onset_dates = [
-        c.get("onset", "")
-        for c in history.get("conditions", [])
-        if c.get("onset")
-    ]
-    onset_dates.sort()
     earliest_onset = onset_dates[0] if onset_dates else "unknown"
 
     prompt = f"""You are ATLAS, an AI diagnostic agent specialising in rare disease identification.
@@ -116,9 +107,13 @@ Generate a structured diagnostic report. Return ONLY valid JSON — no markdown,
 Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Next steps: 4-5."""
 
     client = _get_client()
-    response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
 
-    text = response.text.strip()
+    text = message.content[0].text.strip()
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1] if len(parts) > 1 else text
@@ -138,11 +133,9 @@ Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Nex
         },
         "disease_matches": disease_matches.get("matches", [])[:5],
         "data_points_analyzed": {
-            "conditions": len(history.get("conditions", [])),
+            "conditions": len(conditions),
             "total_observations": len(history.get("observations", [])),
-            "abnormal_observations": sum(
-                1 for o in history.get("observations", []) if o.get("abnormal")
-            ),
+            "abnormal_observations": len(abnormal_obs),
             "medications": len(history.get("medications", [])),
             "hpo_terms_extracted": len(phenotypes.get("hpo_terms", [])),
         },
