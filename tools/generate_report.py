@@ -1,8 +1,9 @@
+import asyncio
 import json
 import os
 from typing import Annotated
 
-from anthropic import AsyncAnthropic
+import anthropic
 from mcp.server.fastmcp import Context
 from pydantic import Field
 
@@ -10,10 +11,6 @@ from fhir_utilities import get_patient_id_if_context_exists
 from tools.extract_phenotypes import extract_phenotype_signals
 from tools.get_patient_history import get_patient_longitudinal_history
 from tools.match_rare_diseases import match_rare_diseases
-
-
-def _get_client():
-    return AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
 async def run_atlas_analysis(
@@ -110,8 +107,9 @@ Generate a structured diagnostic report. Return ONLY valid JSON — no markdown,
 Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Next steps: 4-5."""
 
     try:
-        client = _get_client()
-        message = await client.messages.create(
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+        message = await asyncio.to_thread(
+            client.messages.create,
             model="claude-haiku-4-5-20251001",
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],

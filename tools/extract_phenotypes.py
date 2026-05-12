@@ -1,12 +1,9 @@
+import asyncio
 import json
 import os
 
-from anthropic import AsyncAnthropic
+import anthropic
 from mcp.server.fastmcp import Context
-
-
-def _get_client():
-    return AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
 async def extract_phenotype_signals(
@@ -59,8 +56,9 @@ Return ONLY a valid JSON object (no markdown, no explanation):
   "clinical_summary": "2-3 sentence narrative of the patient's phenotype profile and why it warrants rare disease investigation"
 }}"""
 
-    client = _get_client()
-    message = await client.messages.create(
+    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    message = await asyncio.to_thread(
+        client.messages.create,
         model="claude-haiku-4-5-20251001",
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
