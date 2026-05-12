@@ -3,6 +3,7 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from mcp_instance import mcp
 
@@ -21,6 +22,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/health")
+async def health():
+    return JSONResponse({"status": "ok", "service": "ATLAS Rare Disease Diagnostic Agent"})
+
 
 app.mount("/", mcp.streamable_http_app())
 

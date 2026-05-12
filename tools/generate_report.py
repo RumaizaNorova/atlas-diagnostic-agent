@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import date
 from typing import Annotated
 
 import httpx
@@ -10,6 +11,19 @@ from fhir_utilities import get_patient_id_if_context_exists
 from tools.extract_phenotypes import _call_claude, extract_phenotype_signals
 from tools.get_patient_history import get_patient_longitudinal_history
 from tools.match_rare_diseases import match_rare_diseases
+from tools.search_literature import search_pubmed_literature
+
+
+def _compute_diagnostic_delay(onset_dates: list[str]) -> int | None:
+    """Compute years from earliest symptom onset to today."""
+    for d in onset_dates:
+        try:
+            year = int(d[:4])
+            if 1900 < year <= date.today().year:
+                return date.today().year - year
+        except (ValueError, IndexError):
+            continue
+    return None
 
 
 async def run_atlas_analysis(
@@ -22,9 +36,9 @@ async def run_atlas_analysis(
     """Run ATLAS full rare disease diagnostic analysis.
 
     Reads the patient's complete longitudinal FHIR history, extracts phenotype
-    signals, matches against the Monarch Initiative rare disease database, and
-    returns a structured diagnostic report with candidate diagnoses, missed red
-    flags, and immediate next steps.
+    signals, matches against the Monarch Initiative rare disease database, fetches
+    supporting PubMed literature, and returns a structured diagnostic report with
+    candidate diagnoses, missed red flags, and immediate next steps.
     """
 
     try:
@@ -47,6 +61,22 @@ async def run_atlas_analysis(
     conditions = history.get("conditions", [])
     abnormal_obs = [o for o in history.get("observations", []) if o.get("abnormal")]
     onset_dates = sorted([c.get("onset", "") for c in conditions if c.get("onset")])
+    family_history = history.get("family_history", [])
+    diagnostic_reports = history.get("diagnostic_reports", [])
+    allergies = history.get("allergies", [])
+
+    # Compute real diagnostic delay from FHIR data
+    diagnostic_delay_years = _compute_diagnostic_delay(onset_dates)
+    earliest_onset = onset_dates[0] if onset_dates else "unknown"
+
+    # Fetch PubMed literature for top candidate disease
+    top_matches = disease_matches.get("matches", [])
+    literature = {"articles": []}
+    if top_matches:
+        literature = await search_pubmed_literature(
+            disease_name=top_matches[0]["disease_name"],
+            hpo_terms=phenotypes.get("hpo_terms", []),
+        )
 
     conditions_text = "\n".join(
         f"- {c['display']} (onset: {c.get('onset', 'unknown')})"
@@ -58,36 +88,62 @@ async def run_atlas_analysis(
         for o in abnormal_obs
     )[:2000] or "None documented"
 
+    family_text = "\n".join(
+        f"- {f['relationship']}: {', '.join(f['conditions']) or 'unspecified condition'}"
+        + (" (deceased)" if f.get("deceased") else "")
+        for f in family_history
+    ) or "None documented"
+
+    dr_text = "\n".join(
+        f"- {r['name']} ({r['date'][:10] if r['date'] else 'unknown date'})"
+        + (f": {r['conclusion']}" if r.get("conclusion") else "")
+        for r in diagnostic_reports[:10]
+    ) or "None documented"
+
     top_matches_text = "\n".join(
         f"- {m['disease_name']} | score: {m['similarity_score']} | {', '.join(m['omim_refs']) or 'no OMIM'}"
-        for m in disease_matches.get("matches", [])[:5]
+        for m in top_matches[:5]
     ) or "No strong matches found"
 
+    literature_text = "\n".join(
+        f"- {a['title']} ({a['journal']}, {a['year']}) PMID:{a['pmid']}"
+        for a in literature.get("articles", [])[:3]
+    ) or "No recent literature retrieved"
+
     phenotype_summary = phenotypes.get("clinical_summary", "")
-    earliest_onset = onset_dates[0] if onset_dates else "unknown"
 
     prompt = f"""You are ATLAS, an AI diagnostic agent specialising in rare disease identification.
 A patient with a complex, unresolved clinical picture has been referred for rare disease evaluation.
 
 PATIENT RECORD SUMMARY
 Earliest documented symptom onset: {earliest_onset}
+Time from first symptom to today: {f"{diagnostic_delay_years} years" if diagnostic_delay_years else "unknown"}
 
 Documented conditions:
 {conditions_text}
 
-Abnormal findings:
+Abnormal lab / observation findings:
 {abnormal_text}
 
-Phenotype profile extracted by ATLAS:
+Family history (hereditary rare diseases often follow familial patterns):
+{family_text}
+
+Diagnostic reports on file:
+{dr_text}
+
+Phenotype profile extracted by ATLAS (HPO terms):
 {phenotype_summary}
 
 Top rare disease candidates (Monarch Initiative phenotype similarity):
 {top_matches_text}
 
+Recent PubMed literature on top candidate:
+{literature_text}
+
 Generate a structured diagnostic report. Return ONLY valid JSON — no markdown, no explanation:
 {{
   "executive_summary": "2-3 sentences summarising the diagnostic picture and why rare disease workup is warranted",
-  "estimated_diagnostic_delay_years": <integer or null>,
+  "estimated_diagnostic_delay_years": {diagnostic_delay_years if diagnostic_delay_years is not None else "null"},
   "top_candidates": [
     {{
       "disease_name": "...",
@@ -127,12 +183,18 @@ Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Nex
             "hpo_terms": phenotypes.get("hpo_terms", []),
             "clinical_summary": phenotype_summary,
         },
-        "disease_matches": disease_matches.get("matches", [])[:5],
+        "disease_matches": top_matches[:5],
+        "supporting_literature": literature.get("articles", [])[:3],
         "data_points_analyzed": {
             "conditions": len(conditions),
             "total_observations": len(history.get("observations", [])),
             "abnormal_observations": len(abnormal_obs),
             "medications": len(history.get("medications", [])),
+            "procedures": len(history.get("procedures", [])),
+            "family_history_entries": len(family_history),
+            "diagnostic_reports": len(diagnostic_reports),
+            "allergies": len(allergies),
             "hpo_terms_extracted": len(phenotypes.get("hpo_terms", [])),
+            "pubmed_articles_found": len(literature.get("articles", [])),
         },
     }

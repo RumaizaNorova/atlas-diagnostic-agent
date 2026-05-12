@@ -4,6 +4,7 @@ from tools.extract_phenotypes import extract_phenotype_signals
 from tools.generate_report import run_atlas_analysis
 from tools.get_patient_history import get_patient_longitudinal_history
 from tools.match_rare_diseases import match_rare_diseases
+from tools.search_literature import search_pubmed_literature
 
 mcp = FastMCP("ATLAS Diagnostic Agent", stateless_http=True, host="0.0.0.0")
 
@@ -56,12 +57,21 @@ mcp.tool(
 )(match_rare_diseases)
 
 mcp.tool(
+    name="SearchPubMedLiterature",
+    description=(
+        "Search PubMed for recent clinical case reports and studies on a rare disease candidate. "
+        "Returns titles, authors, journal, and PubMed links for supporting evidence."
+    ),
+)(search_pubmed_literature)
+
+mcp.tool(
     name="RunATLASAnalysis",
     description=(
         "ATLAS full rare disease diagnostic analysis. Reads the patient's complete "
-        "longitudinal FHIR history, extracts phenotype signals, cross-references against "
-        "the Monarch Initiative rare disease database, and returns a structured report "
-        "with candidate diagnoses, missed red flags, and immediate next steps. "
-        "Use this as the primary entry point for a full diagnostic workup."
+        "longitudinal FHIR history (conditions, labs, medications, procedures, family history, "
+        "diagnostic reports, allergies), extracts HPO phenotype signals, cross-references against "
+        "the Monarch Initiative rare disease database, fetches supporting PubMed literature, "
+        "and returns a structured report with candidate diagnoses, missed red flags, and "
+        "immediate next steps. Use this as the primary entry point for a full diagnostic workup."
     ),
 )(run_atlas_analysis)

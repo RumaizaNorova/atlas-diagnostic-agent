@@ -14,7 +14,7 @@ async def get_patient_longitudinal_history(
     ] = None,
     ctx: Context = None,
 ) -> dict:
-    """Read the patient's full longitudinal FHIR history: conditions, labs, medications, procedures."""
+    """Read the patient's full longitudinal FHIR history: conditions, labs, medications, procedures, family history, diagnostic reports, and allergies."""
 
     fhir_context = get_fhir_context(ctx)
     if not fhir_context:
@@ -33,6 +33,9 @@ async def get_patient_longitudinal_history(
         "observations": [],
         "medications": [],
         "procedures": [],
+        "family_history": [],
+        "diagnostic_reports": [],
+        "allergies": [],
     }
 
     # --- Conditions ---
@@ -109,6 +112,62 @@ async def get_patient_longitudinal_history(
                 "name": coding.get("display") or code.get("text", "Unknown"),
                 "status": r.get("status", ""),
                 "date": r.get("performedDateTime", ""),
+            })
+
+    # --- Family History (critical for rare/hereditary diseases) ---
+    fmh_bundle = await client.search("FamilyMemberHistory", {"patient": patientId, "_count": "50"})
+    if fmh_bundle and "entry" in fmh_bundle:
+        for entry in fmh_bundle["entry"]:
+            r = entry.get("resource", {})
+            relationship = r.get("relationship", {})
+            rel_coding = relationship.get("coding", [{}])[0] if relationship.get("coding") else {}
+            conditions_fmh = []
+            for cond in r.get("condition", []):
+                c_code = cond.get("code", {})
+                c_coding = c_code.get("coding", [{}])[0] if c_code.get("coding") else {}
+                conditions_fmh.append(
+                    c_coding.get("display") or c_code.get("text", "Unknown condition")
+                )
+            history["family_history"].append({
+                "relationship": rel_coding.get("display") or relationship.get("text", "Unknown"),
+                "conditions": conditions_fmh,
+                "deceased": r.get("deceasedBoolean", False),
+            })
+
+    # --- Diagnostic Reports (genetic tests, imaging, lab panels) ---
+    dr_bundle = await client.search(
+        "DiagnosticReport",
+        {"patient": patientId, "_count": "50", "_sort": "-date"},
+    )
+    if dr_bundle and "entry" in dr_bundle:
+        for entry in dr_bundle["entry"]:
+            r = entry.get("resource", {})
+            code = r.get("code", {})
+            coding = code.get("coding", [{}])[0] if code.get("coding") else {}
+            history["diagnostic_reports"].append({
+                "name": coding.get("display") or code.get("text", "Unknown"),
+                "status": r.get("status", ""),
+                "date": r.get("effectiveDateTime", r.get("issued", "")),
+                "conclusion": r.get("conclusion", ""),
+            })
+
+    # --- Allergies & Intolerances ---
+    allergy_bundle = await client.search("AllergyIntolerance", {"patient": patientId, "_count": "50"})
+    if allergy_bundle and "entry" in allergy_bundle:
+        for entry in allergy_bundle["entry"]:
+            r = entry.get("resource", {})
+            code = r.get("code", {})
+            coding = code.get("coding", [{}])[0] if code.get("coding") else {}
+            reactions = []
+            for reaction in r.get("reaction", []):
+                for manifestation in reaction.get("manifestation", []):
+                    m_coding = manifestation.get("coding", [{}])[0] if manifestation.get("coding") else {}
+                    reactions.append(m_coding.get("display") or manifestation.get("text", ""))
+            history["allergies"].append({
+                "substance": coding.get("display") or code.get("text", "Unknown"),
+                "type": r.get("type", ""),
+                "criticality": r.get("criticality", ""),
+                "reactions": reactions,
             })
 
     return history
