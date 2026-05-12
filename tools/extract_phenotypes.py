@@ -1,12 +1,12 @@
 import json
 import os
 
-import anthropic
+from anthropic import AsyncAnthropic
 from mcp.server.fastmcp import Context
 
 
 def _get_client():
-    return anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    return AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
 async def extract_phenotype_signals(
@@ -60,7 +60,7 @@ Return ONLY a valid JSON object (no markdown, no explanation):
 }}"""
 
     client = _get_client()
-    message = client.messages.create(
+    message = await client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],

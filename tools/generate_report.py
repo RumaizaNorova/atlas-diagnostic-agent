@@ -2,7 +2,7 @@ import json
 import os
 from typing import Annotated
 
-import anthropic
+from anthropic import AsyncAnthropic
 from mcp.server.fastmcp import Context
 from pydantic import Field
 
@@ -13,7 +13,7 @@ from tools.match_rare_diseases import match_rare_diseases
 
 
 def _get_client():
-    return anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    return AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
 async def run_atlas_analysis(
@@ -31,19 +31,22 @@ async def run_atlas_analysis(
     flags, and immediate next steps.
     """
 
-    if not patientId and ctx:
-        patientId = get_patient_id_if_context_exists(ctx)
+    try:
+        if not patientId and ctx:
+            patientId = get_patient_id_if_context_exists(ctx)
 
-    history = await get_patient_longitudinal_history(patientId=patientId, ctx=ctx)
-    if "error" in history:
-        return {"error": history["error"]}
+        history = await get_patient_longitudinal_history(patientId=patientId, ctx=ctx)
+        if "error" in history:
+            return {"error": history["error"]}
 
-    phenotypes = await extract_phenotype_signals(patient_history=history, ctx=ctx)
+        phenotypes = await extract_phenotype_signals(patient_history=history, ctx=ctx)
 
-    disease_matches = await match_rare_diseases(
-        hpo_terms=phenotypes.get("hpo_terms", []),
-        ctx=ctx,
-    )
+        disease_matches = await match_rare_diseases(
+            hpo_terms=phenotypes.get("hpo_terms", []),
+            ctx=ctx,
+        )
+    except Exception as exc:
+        return {"error": f"ATLAS pipeline failed: {type(exc).__name__}: {exc}"}
 
     conditions = history.get("conditions", [])
     abnormal_obs = [o for o in history.get("observations", []) if o.get("abnormal")]
@@ -106,12 +109,15 @@ Generate a structured diagnostic report. Return ONLY valid JSON — no markdown,
 
 Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Next steps: 4-5."""
 
-    client = _get_client()
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        client = _get_client()
+        message = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as exc:
+        return {"error": f"Anthropic API failed: {type(exc).__name__}: {exc}"}
 
     text = message.content[0].text.strip()
     if text.startswith("```"):
