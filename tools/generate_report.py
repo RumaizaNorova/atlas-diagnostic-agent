@@ -109,6 +109,7 @@ Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Nex
         text = await _call_claude(prompt, max_tokens=2048)
     except Exception as exc:
         return {"error": f"Anthropic API failed: {type(exc).__name__}: {exc}"}
+
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1] if len(parts) > 1 else text
