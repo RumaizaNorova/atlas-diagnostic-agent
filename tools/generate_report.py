@@ -13,6 +13,7 @@ from tools.enrich_hpo_terms import enrich_hpo_terms
 from tools.extract_phenotypes import _call_claude, extract_phenotype_signals
 from tools.get_disease_genes import get_disease_genes
 from tools.get_patient_history import get_patient_longitudinal_history
+from tools.lookup_clinvar import lookup_clinvar_variants
 from tools.match_rare_diseases import match_rare_diseases
 from tools.search_literature import search_pubmed_literature
 
@@ -153,11 +154,19 @@ async def run_atlas_analysis(
         if isinstance(literature, Exception):
             literature = {"articles": []}
 
+        # ClinVar lookup depends on gene results — run after gather
+        clinvar_result = await lookup_clinvar_variants(
+            disease_genes=gene_data_result.get("disease_genes", [])
+        )
+        if isinstance(clinvar_result, Exception):
+            clinvar_result = {"clinvar_results": [], "total_pathogenic_variants_found": 0}
+
     except Exception as exc:
         lab_trends = {"trends": [], "persistent_abnormalities": [], "summary": ""}
         hpo_enriched = {"enriched_terms": phenotypes.get("hpo_terms", [])}
         gene_data_result = {"disease_genes": []}
         literature = {"articles": []}
+        clinvar_result = {"clinvar_results": [], "total_pathogenic_variants_found": 0}
 
     conditions = history.get("conditions", [])
     abnormal_obs = [o for o in history.get("observations", []) if o.get("abnormal")]
@@ -167,6 +176,7 @@ async def run_atlas_analysis(
     allergies = history.get("allergies", [])
     top_matches = disease_matches.get("matches", [])
     gene_data = gene_data_result.get("disease_genes", [])
+    clinvar_data = clinvar_result.get("clinvar_results", [])
     persistent_abnormalities = lab_trends.get("persistent_abnormalities", [])
 
     diagnostic_delay_years = _compute_diagnostic_delay(onset_dates)
@@ -198,6 +208,12 @@ async def run_atlas_analysis(
     ) or "No recent literature retrieved"
 
     phenotype_summary = phenotypes.get("clinical_summary", "")
+
+    clinvar_text = "\n".join(
+        f"- {r['gene']} ({r['disease']}): {r['total_pathogenic']} pathogenic variants in ClinVar"
+        for r in clinvar_data[:5]
+        if r.get("total_pathogenic", 0) > 0
+    ) or "No ClinVar variants found for candidate genes"
 
     # Pass 1: structured reasoning
     reasoning_json = {}
@@ -263,6 +279,9 @@ TOP DISEASE MATCHES (Monarch Initiative):
 ASSOCIATED GENES PER CANDIDATE:
 {gene_summary_text}
 
+KNOWN PATHOGENIC CLINVAR VARIANTS IN CANDIDATE GENES:
+{clinvar_text}
+
 SUPPORTING LITERATURE:
 {literature_text}
 
@@ -320,6 +339,7 @@ Top candidates: up to 3. Red flags: 3-5. Next steps: 4-5. Genetic panels: 1-3.""
         },
         "disease_matches": top_matches[:5],
         "disease_genes": gene_data,
+        "clinvar_variants": clinvar_data,
         "lab_analysis": {
             "persistent_abnormalities": persistent_abnormalities,
             "worsening_trends": worsening,
@@ -340,5 +360,6 @@ Top candidates: up to 3. Red flags: 3-5. Next steps: 4-5. Genetic panels: 1-3.""
             "lab_series_analyzed": len(lab_trends.get("trends", [])),
             "persistent_abnormalities": len(persistent_abnormalities),
             "pubmed_articles": len(literature.get("articles", [])),
+            "clinvar_variants_found": clinvar_result.get("total_pathogenic_variants_found", 0),
         },
     }

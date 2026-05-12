@@ -3,9 +3,11 @@ from mcp.server.fastmcp import FastMCP
 from tools.analyze_lab_trends import analyze_lab_trends
 from tools.enrich_hpo_terms import enrich_hpo_terms
 from tools.extract_phenotypes import extract_phenotype_signals
+from tools.generate_referral_letter import generate_referral_letter
 from tools.generate_report import run_atlas_analysis
 from tools.get_disease_genes import get_disease_genes
 from tools.get_patient_history import get_patient_longitudinal_history
+from tools.lookup_clinvar import lookup_clinvar_variants
 from tools.match_rare_diseases import match_rare_diseases
 from tools.search_literature import search_pubmed_literature
 
@@ -85,6 +87,25 @@ mcp.tool(
         "Monarch Initiative and NCBI. Returns gene symbols to guide targeted genetic panel ordering."
     ),
 )(get_disease_genes)
+
+mcp.tool(
+    name="LookupClinVarVariants",
+    description=(
+        "Queries the NCBI ClinVar database for known pathogenic and likely-pathogenic "
+        "variants in genes associated with top rare disease candidates. Returns variant "
+        "IDs, clinical significance, and ClinVar URLs to guide genetic panel ordering."
+    ),
+)(lookup_clinvar_variants)
+
+mcp.tool(
+    name="GenerateReferralLetter",
+    description=(
+        "Generates a complete, ready-to-send clinical genetics referral letter based on "
+        "the ATLAS diagnostic report. Includes patient presentation, key findings, top "
+        "candidate diagnoses, requested genetic workup, and ClinVar variant context. "
+        "Run RunATLASAnalysis first, then pass the result to this tool."
+    ),
+)(generate_referral_letter)
 
 mcp.tool(
     name="SearchPubMedLiterature",
