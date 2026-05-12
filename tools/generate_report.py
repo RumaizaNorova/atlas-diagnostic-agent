@@ -1,9 +1,7 @@
 import json
-import os
 from datetime import date
 from typing import Annotated
 
-import httpx
 from mcp.server.fastmcp import Context
 from pydantic import Field
 
@@ -95,48 +93,31 @@ Return ONLY valid JSON:
     return text
 
 
-async def run_atlas_analysis(
-    patientId: Annotated[
-        str | None,
-        Field(description="Patient ID — optional if FHIR context is provided by the platform"),
-    ] = None,
-    ctx: Context = None,
-) -> dict:
-    """Run ATLAS full rare disease diagnostic analysis.
+async def _run_atlas_pipeline(history: dict) -> dict:
+    """Core ATLAS pipeline — takes a pre-loaded patient history dict.
 
-    Reads the patient's complete longitudinal FHIR history across 8 resource types,
-    extracts and enriches HPO phenotype signals, matches against the Monarch Initiative
-    rare disease database, analyzes multi-year lab trends, looks up disease-associated genes,
-    fetches PubMed literature, performs structured two-pass AI reasoning, and returns
-    a comprehensive diagnostic report with candidate diagnoses, missed red flags,
-    gene panels to order, and immediate next steps.
+    Extracts HPO phenotype signals, matches rare diseases, runs parallel enrichment
+    (lab trends, gene lookup, ClinVar, PubMed), performs two-pass AI reasoning,
+    and returns the full structured report. Used by both the MCP tool and REST API.
     """
+    import asyncio
 
     try:
-        if not patientId and ctx:
-            patientId = get_patient_id_if_context_exists(ctx)
-
-        history = await get_patient_longitudinal_history(patientId=patientId, ctx=ctx)
-        if "error" in history:
-            return {"error": history["error"]}
-
-        phenotypes = await extract_phenotype_signals(patient_history=history, ctx=ctx)
-
-        disease_matches = await match_rare_diseases(
-            hpo_terms=phenotypes.get("hpo_terms", []),
-            ctx=ctx,
-        )
+        phenotypes = await extract_phenotype_signals(patient_history=history)
+        disease_matches = await match_rare_diseases(hpo_terms=phenotypes.get("hpo_terms", []))
     except Exception as exc:
         return {"error": f"ATLAS pipeline failed: {type(exc).__name__}: {exc}"}
 
-    # Run enrichment steps in parallel
     try:
-        import asyncio
         lab_trends_task = analyze_lab_trends(patient_history=history)
         hpo_enrichment_task = enrich_hpo_terms(hpo_terms=phenotypes.get("hpo_terms", []))
         gene_lookup_task = get_disease_genes(disease_matches=disease_matches.get("matches", []))
         literature_task = search_pubmed_literature(
-            disease_name=disease_matches.get("matches", [{}])[0].get("disease_name", "") if disease_matches.get("matches") else "",
+            disease_name=(
+                disease_matches.get("matches", [{}])[0].get("disease_name", "")
+                if disease_matches.get("matches")
+                else ""
+            ),
             hpo_terms=phenotypes.get("hpo_terms", []),
         )
 
@@ -154,14 +135,13 @@ async def run_atlas_analysis(
         if isinstance(literature, Exception):
             literature = {"articles": []}
 
-        # ClinVar lookup depends on gene results — run after gather
         clinvar_result = await lookup_clinvar_variants(
             disease_genes=gene_data_result.get("disease_genes", [])
         )
         if isinstance(clinvar_result, Exception):
             clinvar_result = {"clinvar_results": [], "total_pathogenic_variants_found": 0}
 
-    except Exception as exc:
+    except Exception:
         lab_trends = {"trends": [], "persistent_abnormalities": [], "summary": ""}
         hpo_enriched = {"enriched_terms": phenotypes.get("hpo_terms", [])}
         gene_data_result = {"disease_genes": []}
@@ -215,7 +195,6 @@ async def run_atlas_analysis(
         if r.get("total_pathogenic", 0) > 0
     ) or "No ClinVar variants found for candidate genes"
 
-    # Pass 1: structured reasoning
     reasoning_json = {}
     try:
         reasoning_text = await _marshal_evidence(
@@ -238,7 +217,6 @@ async def run_atlas_analysis(
     except Exception:
         reasoning_json = {}
 
-    # Build gene text for final report
     gene_summary_text = "\n".join(
         f"- {g['disease_name']}: {', '.join(g['gene_symbols'][:5]) or 'no genes found'}"
         for g in gene_data
@@ -253,7 +231,6 @@ async def run_atlas_analysis(
     most_likely = reasoning_json.get("most_likely_diagnosis", "")
     reasoning_confidence = reasoning_json.get("reasoning_confidence", "")
 
-    # Pass 2: final report synthesis
     prompt = f"""You are ATLAS, an AI diagnostic agent specialising in rare disease identification.
 You have completed a full multi-source diagnostic workup. Now synthesise the final report.
 
@@ -363,3 +340,32 @@ Top candidates: up to 3. Red flags: 3-5. Next steps: 4-5. Genetic panels: 1-3.""
             "clinvar_variants_found": clinvar_result.get("total_pathogenic_variants_found", 0),
         },
     }
+
+
+async def run_atlas_analysis(
+    patientId: Annotated[
+        str | None,
+        Field(description="Patient ID — optional if FHIR context is provided by the platform"),
+    ] = None,
+    ctx: Context = None,
+) -> dict:
+    """Run ATLAS full rare disease diagnostic analysis.
+
+    Reads the patient's complete longitudinal FHIR history across 8 resource types,
+    extracts and enriches HPO phenotype signals, matches against the Monarch Initiative
+    rare disease database, analyzes multi-year lab trends, looks up disease-associated genes,
+    fetches PubMed literature, performs structured two-pass AI reasoning, and returns
+    a comprehensive diagnostic report with candidate diagnoses, missed red flags,
+    gene panels to order, and immediate next steps.
+    """
+    try:
+        if not patientId and ctx:
+            patientId = get_patient_id_if_context_exists(ctx)
+
+        history = await get_patient_longitudinal_history(patientId=patientId, ctx=ctx)
+        if "error" in history:
+            return {"error": history["error"]}
+    except Exception as exc:
+        return {"error": f"FHIR fetch failed: {type(exc).__name__}: {exc}"}
+
+    return await _run_atlas_pipeline(history)
