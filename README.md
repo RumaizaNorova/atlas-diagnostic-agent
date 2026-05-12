@@ -1,8 +1,10 @@
-# ATLAS — AI Diagnostic Agent for Rare Disease
+# ATLAS — Rare Disease Diagnostic Agent
 
 > *The average rare disease patient sees 7 doctors over 4 years before receiving a correct diagnosis. The clues were always in the chart. No one connected them.*
 
-ATLAS is an MCP server that reads a patient's complete longitudinal FHIR history, extracts phenotype signals, and cross-references them against the Monarch Initiative rare disease database — surfacing what years of fragmented care missed.
+ATLAS is a production-ready MCP server that performs end-to-end rare disease diagnostic analysis. It reads a patient's complete longitudinal FHIR history across 8 resource types, extracts HPO phenotype signals, cross-references 6 biomedical databases, performs two-pass AI reasoning, and returns a structured diagnostic report — then writes findings back to the EHR as a FHIR DiagnosticReport.
+
+**Live server:** `https://atlas-diagnostic-agent.onrender.com`
 
 ---
 
@@ -14,38 +16,53 @@ ATLAS is an MCP server that reads a patient's complete longitudinal FHIR history
 
 ---
 
-## How It Works
-
-ATLAS is built as an MCP server that integrates natively with the Prompt Opinion platform via FHIR context propagation (SHARP extension spec).
+## Architecture
 
 ```
-Patient selected in Prompt Opinion
-        │
-        ▼
-GetPatientLongitudinalHistory   ← reads Condition, Observation,
-        │                          MedicationRequest, Procedure from FHIR
-        ▼
-ExtractPhenotypeSignals         ← maps clinical findings to HPO terms
-        │                          using Gemini 2.0 Flash
-        ▼
-MatchRareDiseases               ← queries Monarch Initiative semsim API
-        │                          with patient's HPO phenotype profile
-        ▼
-RunATLASAnalysis                ← synthesises structured diagnostic report:
-                                   candidate diagnoses · missed red flags
-                                   confirmatory tests · immediate next steps
+FHIR EHR (Epic)
+      │
+      ▼
+GetPatientLongitudinalHistory   ← 8 FHIR resource types
+      │
+      ├── ExtractPhenotypeSignals  ← Claude AI → HPO terms
+      │         └── EnrichHPOTerms  ← hpo.jax.org official ontology
+      │
+      ├── MatchRareDiseases  ← Monarch Initiative phenotype similarity
+      │         └── GetDiseaseGenes  ← Monarch + NCBI gene associations
+      │                   └── LookupClinVarVariants  ← NCBI ClinVar pathogenic variants
+      │
+      ├── AnalyzeLabTrends  ← worsening/persistent patterns (pure computation)
+      │
+      └── SearchPubMedLiterature  ← NIH PubMed case reports
+                │
+                ▼
+         RunATLASAnalysis  ← two-pass AI reasoning → structured report
+                │
+                ├── ComputeUrgencyScore      ← triage 1-5 score
+                ├── GenerateReferralLetter   ← ready-to-send clinical letter
+                ├── GeneratePatientSummary   ← plain language for patient
+                └── WriteATLASReportToFHIR  ← FHIR R4 DiagnosticReport write-back
 ```
 
 ---
 
-## MCP Tools
+## MCP Tools (13 total)
 
-| Tool | Description |
-|------|-------------|
-| `RunATLASAnalysis` | **Primary tool.** Full end-to-end rare disease workup for a patient. |
-| `GetPatientLongitudinalHistory` | Reads complete FHIR history across all resource types. |
-| `ExtractPhenotypeSignals` | Converts clinical findings to HPO phenotype terms. |
-| `MatchRareDiseases` | Queries Monarch Initiative by HPO profile, returns ranked candidates. |
+| Tool | Description | APIs |
+|------|-------------|------|
+| `GetPatientLongitudinalHistory` | Reads Condition, Observation, MedicationRequest, Procedure, FamilyMemberHistory, DiagnosticReport, AllergyIntolerance, Patient | FHIR R4 |
+| `ExtractPhenotypeSignals` | Maps clinical findings to HPO phenotype terms | Anthropic Claude |
+| `EnrichHPOTerms` | Official definitions and synonyms from HPO ontology | hpo.jax.org |
+| `MatchRareDiseases` | Phenotype similarity scoring against rare disease database | Monarch Initiative |
+| `GetDiseaseGenes` | Causal gene lookup for candidate diseases | Monarch Initiative, NCBI Gene |
+| `LookupClinVarVariants` | Known pathogenic variants in candidate genes | NCBI ClinVar |
+| `AnalyzeLabTrends` | Detects worsening/persistent multi-year lab abnormalities | — (pure computation) |
+| `SearchPubMedLiterature` | Recent case reports for top candidate disease | NIH PubMed |
+| `RunATLASAnalysis` | Full pipeline with two-pass AI reasoning | All of the above |
+| `ComputeUrgencyScore` | Triage score 1-5 (Routine → Emergent) with rationale | — (pure computation) |
+| `GenerateReferralLetter` | Ready-to-send clinical genetics referral letter | Anthropic Claude |
+| `GeneratePatientSummary` | Plain-language patient-facing summary | Anthropic Claude |
+| `WriteATLASReportToFHIR` | Writes findings back to EHR as FHIR R4 DiagnosticReport | FHIR R4 |
 
 ---
 
@@ -54,79 +71,74 @@ RunATLASAnalysis                ← synthesises structured diagnostic report:
 ```json
 {
   "atlas_report": {
-    "executive_summary": "Patient presents with a 6-year history of fatigue, joint pain, recurrent rash, and persistently elevated ANA. The combination of multisystem involvement with positive autoimmune markers warrants urgent rare disease evaluation.",
-    "estimated_diagnostic_delay_years": 6,
+    "executive_summary": "Patient presents with a 7-year history of fatigue, joint hypermobility, and recurrent subluxations. The combination of multisystem connective tissue involvement warrants urgent rare disease evaluation.",
+    "estimated_diagnostic_delay_years": 7,
     "top_candidates": [
       {
-        "disease_name": "Systemic Lupus Erythematosus",
-        "omim": "OMIM:152700",
+        "disease_name": "Ehlers-Danlos Syndrome, Hypermobile Type",
+        "omim": "OMIM:130020",
         "match_strength": "Strong",
-        "supporting_evidence": [
-          "ANA positive (2019, 2021, 2023) — documented three times, never actioned",
-          "Recurrent malar rash noted in dermatology visit (2020)",
-          "Arthralgia across multiple joints with no structural finding"
-        ],
-        "recommended_confirmatory_tests": ["Anti-dsDNA antibody", "Complement C3/C4", "Complete metabolic panel"]
+        "supporting_evidence": ["Joint hypermobility documented across 4 visits", "Chronic pain unresolved by standard treatment"],
+        "against_evidence": ["No skin hyperextensibility noted"],
+        "causal_genes": ["COL5A1", "COL5A2"],
+        "recommended_confirmatory_tests": ["Beighton score assessment", "Genetics referral", "Echocardiogram"]
       }
     ],
-    "red_flags_missed": [
-      "Three separate ANA-positive results across 4 years — each addressed in isolation",
-      "Fatigue + joint pain + rash triad present from 2018, never evaluated together"
-    ],
-    "immediate_next_steps": [
-      "Urgent rheumatology referral",
-      "Anti-dsDNA, anti-Smith, anti-Ro/La antibody panel",
-      "Urinalysis with microscopy to assess renal involvement",
-      "Complement levels (C3, C4, CH50)"
-    ],
-    "atlas_confidence": "High",
-    "atlas_confidence_rationale": "Strong phenotype-disease match supported by repeated objective lab findings in the record."
+    "red_flags_missed": ["Recurrent subluxations across 3 years never evaluated for connective tissue disorder"],
+    "genetic_panels_to_order": ["Connective tissue disorder panel (COL5A1, COL5A2, COL3A1, FBN1)"],
+    "atlas_confidence": "High"
+  },
+  "data_points_analyzed": {
+    "conditions": 12, "total_observations": 187, "abnormal_observations": 23,
+    "hpo_terms_extracted": 14, "lab_series_analyzed": 31,
+    "persistent_abnormalities": 4, "clinvar_variants_found": 47, "pubmed_articles": 3
   }
 }
 ```
 
 ---
 
-## Running Locally
+## Setup
 
 ```bash
 git clone https://github.com/RumaizaNorova/atlas-diagnostic-agent
 cd atlas-diagnostic-agent
-
 pip install -r requirements.txt
-
 cp .env.example .env
-# Add your GEMINI_API_KEY to .env
-
-python main.py
-# Server runs on http://localhost:8000/mcp
+# Add ANTHROPIC_API_KEY to .env
+uvicorn main:app --reload
+# Server runs on http://localhost:8000
 ```
 
-Expose via ngrok for testing with Prompt Opinion:
-```bash
-ngrok http 8000
-# Copy the ngrok URL → paste into Prompt Opinion as MCP server URL + /mcp
-```
+Health check: `GET /health`
 
 ---
 
 ## Deployment
 
-Deployed on Railway. Set `GEMINI_API_KEY` as an environment variable in the Railway dashboard.
+Deployed on Render. Set `ANTHROPIC_API_KEY` as an environment variable in the Render dashboard.
 
 ---
 
-## Standards Compliance
+## Standards
 
-- **MCP** — Streamable HTTP transport, `mcp` Python SDK
-- **FHIR R4** — Reads Patient, Condition, Observation, MedicationRequest, Procedure
+- **MCP** — Streamable HTTP transport, FastMCP Python SDK, stateless
+- **FHIR R4** — Reads and writes 8+ resource types via Epic
 - **SHARP** — Declares `ai.promptopinion/fhir-context` extension in MCP capabilities
-- **HPO** — Human Phenotype Ontology terms via Monarch Initiative API
-- **MONDO** — Disease ontology returned by Monarch semsim search
+- **HPO** — Human Phenotype Ontology terms, validated against hpo.jax.org
+- **MONDO** — Disease ontology via Monarch Initiative
+- **LOINC** — DiagnosticReport coded with LOINC 81247-9
 
 ---
 
-## External APIs
+## External APIs (7 total, all free)
 
-- [Monarch Initiative](https://monarchinitiative.org/) — open, no key required
-- [Google Gemini 2.0 Flash](https://ai.google.dev/) — phenotype extraction + report synthesis
+- [Monarch Initiative](https://monarchinitiative.org/) — phenotype similarity, gene associations
+- [NCBI ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/) — pathogenic variant database
+- [NCBI PubMed](https://pubmed.ncbi.nlm.nih.gov/) — clinical literature
+- [NCBI Gene](https://www.ncbi.nlm.nih.gov/gene/) — gene-disease associations
+- [HPO Ontology API](https://hpo.jax.org/) — term definitions and synonyms
+- [Anthropic Claude](https://anthropic.com/) — phenotype extraction and report synthesis
+- [Epic FHIR R4](https://fhir.epic.com/) — patient health records
+
+Built for the **Agents Assemble — The Healthcare AI Endgame** hackathon on Prompt Opinion.

@@ -1,8 +1,10 @@
 from mcp.server.fastmcp import FastMCP
 
 from tools.analyze_lab_trends import analyze_lab_trends
+from tools.compute_urgency_score import compute_urgency_score
 from tools.enrich_hpo_terms import enrich_hpo_terms
 from tools.extract_phenotypes import extract_phenotype_signals
+from tools.generate_patient_summary import generate_patient_summary
 from tools.generate_referral_letter import generate_referral_letter
 from tools.generate_report import run_atlas_analysis
 from tools.get_disease_genes import get_disease_genes
@@ -115,6 +117,25 @@ mcp.tool(
         "Returns titles, authors, journal, and PubMed links for supporting evidence."
     ),
 )(search_pubmed_literature)
+
+mcp.tool(
+    name="ComputeUrgencyScore",
+    description=(
+        "Computes a 1-5 urgency/triage score for rare disease workup based on diagnostic delay, "
+        "disease severity of top candidates, multi-year lab trends, and missed red flags. "
+        "Returns urgency level (Routine/Soon/Elevated/Urgent/Emergent) with rationale "
+        "to help clinicians prioritise rare disease referrals. Run RunATLASAnalysis first."
+    ),
+)(compute_urgency_score)
+
+mcp.tool(
+    name="GeneratePatientSummary",
+    description=(
+        "Generates a plain-language summary of ATLAS findings written for the patient, not the clinician. "
+        "No medical jargon, no HPO codes — clear, compassionate language explaining what was found, "
+        "what it might mean, and what happens next. Run RunATLASAnalysis first."
+    ),
+)(generate_patient_summary)
 
 mcp.tool(
     name="WriteATLASReportToFHIR",
