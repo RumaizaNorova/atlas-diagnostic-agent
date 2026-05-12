@@ -22,7 +22,8 @@ async def _call_claude(prompt: str, max_tokens: int = 1024) -> str:
                 "messages": [{"role": "user", "content": prompt}],
             },
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            raise ValueError(f"Anthropic {response.status_code}: {response.text}")
         return response.json()["content"][0]["text"].strip()
 
 
