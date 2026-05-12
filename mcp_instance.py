@@ -10,6 +10,7 @@ from tools.get_patient_history import get_patient_longitudinal_history
 from tools.lookup_clinvar import lookup_clinvar_variants
 from tools.match_rare_diseases import match_rare_diseases
 from tools.search_literature import search_pubmed_literature
+from tools.write_fhir_report import write_atlas_report_to_fhir
 
 mcp = FastMCP("ATLAS Diagnostic Agent", stateless_http=True, host="0.0.0.0")
 
@@ -114,6 +115,18 @@ mcp.tool(
         "Returns titles, authors, journal, and PubMed links for supporting evidence."
     ),
 )(search_pubmed_literature)
+
+mcp.tool(
+    name="WriteATLASReportToFHIR",
+    description=(
+        "Writes the ATLAS diagnostic report back to the patient's EHR as a structured "
+        "FHIR R4 DiagnosticReport resource. Closes the loop: ATLAS reads from FHIR, "
+        "reasons over the data, and writes findings back so every clinician sees them. "
+        "Encodes HPO terms, candidate diagnoses (with OMIM codes), confidence level, "
+        "and diagnostic delay as structured FHIR extensions. "
+        "Run RunATLASAnalysis first, then pass the result to this tool."
+    ),
+)(write_atlas_report_to_fhir)
 
 mcp.tool(
     name="RunATLASAnalysis",
