@@ -1,9 +1,29 @@
-import asyncio
 import json
 import os
 
-import anthropic
+import httpx
 from mcp.server.fastmcp import Context
+
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+
+
+async def _call_claude(prompt: str, max_tokens: int = 1024) -> str:
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            ANTHROPIC_API_URL,
+            headers={
+                "x-api-key": os.environ.get("ANTHROPIC_API_KEY", ""),
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+        )
+        response.raise_for_status()
+        return response.json()["content"][0]["text"].strip()
 
 
 async def extract_phenotype_signals(
@@ -56,15 +76,15 @@ Return ONLY a valid JSON object (no markdown, no explanation):
   "clinical_summary": "2-3 sentence narrative of the patient's phenotype profile and why it warrants rare disease investigation"
 }}"""
 
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-    message = await asyncio.to_thread(
-        client.messages.create,
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        text = await _call_claude(prompt, max_tokens=1024)
+    except Exception as exc:
+        return {
+            "hpo_terms": [],
+            "clinical_summary": f"Phenotype extraction failed: {exc}",
+            "parse_error": str(exc),
+        }
 
-    text = message.content[0].text.strip()
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1] if len(parts) > 1 else text

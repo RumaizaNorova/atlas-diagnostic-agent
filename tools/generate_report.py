@@ -1,14 +1,13 @@
-import asyncio
 import json
 import os
 from typing import Annotated
 
-import anthropic
+import httpx
 from mcp.server.fastmcp import Context
 from pydantic import Field
 
 from fhir_utilities import get_patient_id_if_context_exists
-from tools.extract_phenotypes import extract_phenotype_signals
+from tools.extract_phenotypes import _call_claude, extract_phenotype_signals
 from tools.get_patient_history import get_patient_longitudinal_history
 from tools.match_rare_diseases import match_rare_diseases
 
@@ -107,17 +106,9 @@ Generate a structured diagnostic report. Return ONLY valid JSON — no markdown,
 Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Next steps: 4-5."""
 
     try:
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-        message = await asyncio.to_thread(
-            client.messages.create,
-            model="claude-haiku-4-5-20251001",
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        text = await _call_claude(prompt, max_tokens=2048)
     except Exception as exc:
         return {"error": f"Anthropic API failed: {type(exc).__name__}: {exc}"}
-
-    text = message.content[0].text.strip()
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1] if len(parts) > 1 else text
