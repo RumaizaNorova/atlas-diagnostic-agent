@@ -8,14 +8,16 @@ from mcp.server.fastmcp import Context
 from pydantic import Field
 
 from fhir_utilities import get_patient_id_if_context_exists
+from tools.analyze_lab_trends import analyze_lab_trends
+from tools.enrich_hpo_terms import enrich_hpo_terms
 from tools.extract_phenotypes import _call_claude, extract_phenotype_signals
+from tools.get_disease_genes import get_disease_genes
 from tools.get_patient_history import get_patient_longitudinal_history
 from tools.match_rare_diseases import match_rare_diseases
 from tools.search_literature import search_pubmed_literature
 
 
 def _compute_diagnostic_delay(onset_dates: list[str]) -> int | None:
-    """Compute years from earliest symptom onset to today."""
     for d in onset_dates:
         try:
             year = int(d[:4])
@@ -24,6 +26,72 @@ def _compute_diagnostic_delay(onset_dates: list[str]) -> int | None:
         except (ValueError, IndexError):
             continue
     return None
+
+
+async def _marshal_evidence(
+    conditions_text: str,
+    abnormal_text: str,
+    family_text: str,
+    lab_trends_summary: str,
+    persistent_abnormalities: list,
+    phenotype_summary: str,
+    top_matches_text: str,
+    gene_data: list,
+    literature_text: str,
+) -> str:
+    """First reasoning pass: marshal evidence for and against each candidate before writing the report."""
+
+    gene_text = "\n".join(
+        f"- {g['disease_name']}: genes {', '.join(g['gene_symbols'][:5]) or 'unknown'} (via {g.get('source','?')})"
+        for g in gene_data
+    ) or "Gene data unavailable"
+
+    persistent_text = "\n".join(
+        f"- {p['test']}: abnormal in {p['abnormal_readings']}/{p['total_readings']} readings over {p['span_years']} years"
+        for p in persistent_abnormalities[:5]
+    ) or "None detected"
+
+    prompt = f"""You are a rare disease specialist performing structured diagnostic reasoning.
+
+PATIENT DATA SUMMARY:
+Conditions: {conditions_text}
+Abnormal findings: {abnormal_text}
+Family history: {family_text}
+Persistent lab abnormalities (multi-year): {persistent_text}
+Lab trend summary: {lab_trends_summary}
+Phenotype profile (HPO): {phenotype_summary}
+
+TOP CANDIDATE DISEASES (Monarch similarity scores):
+{top_matches_text}
+
+Associated genes per candidate:
+{gene_text}
+
+Supporting literature:
+{literature_text}
+
+For each of the top 3 candidate diseases, reason through:
+1. What findings SUPPORT this diagnosis?
+2. What findings ARGUE AGAINST or are inconsistent?
+3. What is the single most important test to confirm or rule out?
+
+Return ONLY valid JSON:
+{{
+  "candidate_reasoning": [
+    {{
+      "disease": "disease name",
+      "supporting": ["specific patient finding that fits", "..."],
+      "against": ["finding that doesn't fit or is missing", "..."],
+      "key_confirmatory_test": "single most important test"
+    }}
+  ],
+  "most_likely_diagnosis": "disease name or null if unclear",
+  "reasoning_confidence": "High | Moderate | Low",
+  "critical_missing_workup": ["test or referral that was never done but should have been", "..."]
+}}"""
+
+    text = await _call_claude(prompt, max_tokens=1500)
+    return text
 
 
 async def run_atlas_analysis(
@@ -35,10 +103,12 @@ async def run_atlas_analysis(
 ) -> dict:
     """Run ATLAS full rare disease diagnostic analysis.
 
-    Reads the patient's complete longitudinal FHIR history, extracts phenotype
-    signals, matches against the Monarch Initiative rare disease database, fetches
-    supporting PubMed literature, and returns a structured diagnostic report with
-    candidate diagnoses, missed red flags, and immediate next steps.
+    Reads the patient's complete longitudinal FHIR history across 8 resource types,
+    extracts and enriches HPO phenotype signals, matches against the Monarch Initiative
+    rare disease database, analyzes multi-year lab trends, looks up disease-associated genes,
+    fetches PubMed literature, performs structured two-pass AI reasoning, and returns
+    a comprehensive diagnostic report with candidate diagnoses, missed red flags,
+    gene panels to order, and immediate next steps.
     """
 
     try:
@@ -58,29 +128,52 @@ async def run_atlas_analysis(
     except Exception as exc:
         return {"error": f"ATLAS pipeline failed: {type(exc).__name__}: {exc}"}
 
+    # Run enrichment steps in parallel
+    try:
+        import asyncio
+        lab_trends_task = analyze_lab_trends(patient_history=history)
+        hpo_enrichment_task = enrich_hpo_terms(hpo_terms=phenotypes.get("hpo_terms", []))
+        gene_lookup_task = get_disease_genes(disease_matches=disease_matches.get("matches", []))
+        literature_task = search_pubmed_literature(
+            disease_name=disease_matches.get("matches", [{}])[0].get("disease_name", "") if disease_matches.get("matches") else "",
+            hpo_terms=phenotypes.get("hpo_terms", []),
+        )
+
+        lab_trends, hpo_enriched, gene_data_result, literature = await asyncio.gather(
+            lab_trends_task, hpo_enrichment_task, gene_lookup_task, literature_task,
+            return_exceptions=True,
+        )
+
+        if isinstance(lab_trends, Exception):
+            lab_trends = {"trends": [], "persistent_abnormalities": [], "summary": str(lab_trends)}
+        if isinstance(hpo_enriched, Exception):
+            hpo_enriched = {"enriched_terms": phenotypes.get("hpo_terms", [])}
+        if isinstance(gene_data_result, Exception):
+            gene_data_result = {"disease_genes": []}
+        if isinstance(literature, Exception):
+            literature = {"articles": []}
+
+    except Exception as exc:
+        lab_trends = {"trends": [], "persistent_abnormalities": [], "summary": ""}
+        hpo_enriched = {"enriched_terms": phenotypes.get("hpo_terms", [])}
+        gene_data_result = {"disease_genes": []}
+        literature = {"articles": []}
+
     conditions = history.get("conditions", [])
     abnormal_obs = [o for o in history.get("observations", []) if o.get("abnormal")]
     onset_dates = sorted([c.get("onset", "") for c in conditions if c.get("onset")])
     family_history = history.get("family_history", [])
     diagnostic_reports = history.get("diagnostic_reports", [])
     allergies = history.get("allergies", [])
+    top_matches = disease_matches.get("matches", [])
+    gene_data = gene_data_result.get("disease_genes", [])
+    persistent_abnormalities = lab_trends.get("persistent_abnormalities", [])
 
-    # Compute real diagnostic delay from FHIR data
     diagnostic_delay_years = _compute_diagnostic_delay(onset_dates)
     earliest_onset = onset_dates[0] if onset_dates else "unknown"
 
-    # Fetch PubMed literature for top candidate disease
-    top_matches = disease_matches.get("matches", [])
-    literature = {"articles": []}
-    if top_matches:
-        literature = await search_pubmed_literature(
-            disease_name=top_matches[0]["disease_name"],
-            hpo_terms=phenotypes.get("hpo_terms", []),
-        )
-
     conditions_text = "\n".join(
-        f"- {c['display']} (onset: {c.get('onset', 'unknown')})"
-        for c in conditions
+        f"- {c['display']} (onset: {c.get('onset', 'unknown')})" for c in conditions
     ) or "None documented"
 
     abnormal_text = "\n".join(
@@ -89,15 +182,9 @@ async def run_atlas_analysis(
     )[:2000] or "None documented"
 
     family_text = "\n".join(
-        f"- {f['relationship']}: {', '.join(f['conditions']) or 'unspecified condition'}"
+        f"- {f['relationship']}: {', '.join(f['conditions']) or 'unspecified'}"
         + (" (deceased)" if f.get("deceased") else "")
         for f in family_history
-    ) or "None documented"
-
-    dr_text = "\n".join(
-        f"- {r['name']} ({r['date'][:10] if r['date'] else 'unknown date'})"
-        + (f": {r['conclusion']}" if r.get("conclusion") else "")
-        for r in diagnostic_reports[:10]
     ) or "None documented"
 
     top_matches_text = "\n".join(
@@ -112,57 +199,105 @@ async def run_atlas_analysis(
 
     phenotype_summary = phenotypes.get("clinical_summary", "")
 
+    # Pass 1: structured reasoning
+    reasoning_json = {}
+    try:
+        reasoning_text = await _marshal_evidence(
+            conditions_text=conditions_text,
+            abnormal_text=abnormal_text,
+            family_text=family_text,
+            lab_trends_summary=lab_trends.get("summary", ""),
+            persistent_abnormalities=persistent_abnormalities,
+            phenotype_summary=phenotype_summary,
+            top_matches_text=top_matches_text,
+            gene_data=gene_data,
+            literature_text=literature_text,
+        )
+        if reasoning_text.startswith("```"):
+            parts = reasoning_text.split("```")
+            reasoning_text = parts[1] if len(parts) > 1 else reasoning_text
+            if reasoning_text.startswith("json"):
+                reasoning_text = reasoning_text[4:].strip()
+        reasoning_json = json.loads(reasoning_text)
+    except Exception:
+        reasoning_json = {}
+
+    # Build gene text for final report
+    gene_summary_text = "\n".join(
+        f"- {g['disease_name']}: {', '.join(g['gene_symbols'][:5]) or 'no genes found'}"
+        for g in gene_data
+    ) or "Gene associations not retrieved"
+
+    worsening = lab_trends.get("worsening_abnormal_trends", [])
+    worsening_text = "\n".join(
+        f"- {t['test']}: {t['first_value']} ({t['first_date']}) → {t['latest_value']} ({t['latest_date']}), trend: {t.get('trend','unknown')}"
+        for t in worsening[:5]
+    ) or "None detected"
+
+    most_likely = reasoning_json.get("most_likely_diagnosis", "")
+    reasoning_confidence = reasoning_json.get("reasoning_confidence", "")
+
+    # Pass 2: final report synthesis
     prompt = f"""You are ATLAS, an AI diagnostic agent specialising in rare disease identification.
-A patient with a complex, unresolved clinical picture has been referred for rare disease evaluation.
+You have completed a full multi-source diagnostic workup. Now synthesise the final report.
 
-PATIENT RECORD SUMMARY
-Earliest documented symptom onset: {earliest_onset}
-Time from first symptom to today: {f"{diagnostic_delay_years} years" if diagnostic_delay_years else "unknown"}
+PATIENT OVERVIEW
+Earliest onset: {earliest_onset}
+Time undiagnosed: {f"{diagnostic_delay_years} years" if diagnostic_delay_years else "unknown"}
 
-Documented conditions:
-{conditions_text}
+Conditions: {conditions_text}
+Abnormal findings: {abnormal_text}
+Family history: {family_text}
 
-Abnormal lab / observation findings:
-{abnormal_text}
+MULTI-YEAR LAB TRENDS (worsening):
+{worsening_text}
 
-Family history (hereditary rare diseases often follow familial patterns):
-{family_text}
+Persistent abnormalities (>50% readings abnormal over 1+ years):
+{chr(10).join(f"- {p['test']}: {p['abnormal_readings']}/{p['total_readings']} readings over {p['span_years']}y" for p in persistent_abnormalities[:5]) or "None"}
 
-Diagnostic reports on file:
-{dr_text}
+PHENOTYPE PROFILE (HPO): {phenotype_summary}
 
-Phenotype profile extracted by ATLAS (HPO terms):
-{phenotype_summary}
-
-Top rare disease candidates (Monarch Initiative phenotype similarity):
+TOP DISEASE MATCHES (Monarch Initiative):
 {top_matches_text}
 
-Recent PubMed literature on top candidate:
+ASSOCIATED GENES PER CANDIDATE:
+{gene_summary_text}
+
+SUPPORTING LITERATURE:
 {literature_text}
 
-Generate a structured diagnostic report. Return ONLY valid JSON — no markdown, no explanation:
+STRUCTURED REASONING (pass 1):
+Most likely: {most_likely or "unclear"}
+Confidence: {reasoning_confidence or "unknown"}
+{json.dumps(reasoning_json.get("candidate_reasoning", []), indent=2) if reasoning_json.get("candidate_reasoning") else ""}
+
+Generate the final ATLAS diagnostic report. Return ONLY valid JSON:
 {{
-  "executive_summary": "2-3 sentences summarising the diagnostic picture and why rare disease workup is warranted",
+  "executive_summary": "3-4 sentences covering the diagnostic picture, why rare disease workup is warranted, and the leading candidate",
   "estimated_diagnostic_delay_years": {diagnostic_delay_years if diagnostic_delay_years is not None else "null"},
   "top_candidates": [
     {{
       "disease_name": "...",
       "omim": "OMIM:XXXXXX or null",
       "match_strength": "Strong | Moderate | Weak",
-      "supporting_evidence": ["specific finding from this patient's record", "..."],
-      "recommended_confirmatory_tests": ["...", "..."]
+      "supporting_evidence": ["specific finding from this patient", "..."],
+      "against_evidence": ["finding that doesn't fit", "..."],
+      "causal_genes": ["GENE1", "GENE2"],
+      "recommended_confirmatory_tests": ["most important test", "..."]
     }}
   ],
-  "red_flags_missed": ["specific finding + why it should have prompted workup", "..."],
-  "immediate_next_steps": ["concrete clinical action", "..."],
+  "red_flags_missed": ["specific finding + why it should have triggered rare disease workup", "..."],
+  "persistent_lab_abnormalities": ["test name + duration of abnormality", "..."],
+  "immediate_next_steps": ["concrete clinical action with rationale", "..."],
+  "genetic_panels_to_order": ["specific panel name", "..."],
   "atlas_confidence": "High | Moderate | Low",
   "atlas_confidence_rationale": "one sentence"
 }}
 
-Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Next steps: 4-5."""
+Top candidates: up to 3. Red flags: 3-5. Next steps: 4-5. Genetic panels: 1-3."""
 
     try:
-        text = await _call_claude(prompt, max_tokens=2048)
+        text = await _call_claude(prompt, max_tokens=2500)
     except Exception as exc:
         return {"error": f"Anthropic API failed: {type(exc).__name__}: {exc}"}
 
@@ -180,11 +315,18 @@ Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Nex
     return {
         "atlas_report": report,
         "phenotype_profile": {
-            "hpo_terms": phenotypes.get("hpo_terms", []),
+            "hpo_terms": hpo_enriched.get("enriched_terms", phenotypes.get("hpo_terms", [])),
             "clinical_summary": phenotype_summary,
         },
         "disease_matches": top_matches[:5],
+        "disease_genes": gene_data,
+        "lab_analysis": {
+            "persistent_abnormalities": persistent_abnormalities,
+            "worsening_trends": worsening,
+            "summary": lab_trends.get("summary", ""),
+        },
         "supporting_literature": literature.get("articles", [])[:3],
+        "reasoning_pass_1": reasoning_json,
         "data_points_analyzed": {
             "conditions": len(conditions),
             "total_observations": len(history.get("observations", [])),
@@ -195,6 +337,8 @@ Be specific to this patient's data. Top candidates: up to 3. Red flags: 3-5. Nex
             "diagnostic_reports": len(diagnostic_reports),
             "allergies": len(allergies),
             "hpo_terms_extracted": len(phenotypes.get("hpo_terms", [])),
-            "pubmed_articles_found": len(literature.get("articles", [])),
+            "lab_series_analyzed": len(lab_trends.get("trends", [])),
+            "persistent_abnormalities": len(persistent_abnormalities),
+            "pubmed_articles": len(literature.get("articles", [])),
         },
     }

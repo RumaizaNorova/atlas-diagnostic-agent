@@ -1,7 +1,10 @@
 from mcp.server.fastmcp import FastMCP
 
+from tools.analyze_lab_trends import analyze_lab_trends
+from tools.enrich_hpo_terms import enrich_hpo_terms
 from tools.extract_phenotypes import extract_phenotype_signals
 from tools.generate_report import run_atlas_analysis
+from tools.get_disease_genes import get_disease_genes
 from tools.get_patient_history import get_patient_longitudinal_history
 from tools.match_rare_diseases import match_rare_diseases
 from tools.search_literature import search_pubmed_literature
@@ -24,6 +27,8 @@ def _patched_get_capabilities(notification_options, experimental_capabilities):
                 {"name": "patient/MedicationRequest.rs"},
                 {"name": "patient/Procedure.rs"},
                 {"name": "patient/DiagnosticReport.rs"},
+                {"name": "patient/FamilyMemberHistory.rs"},
+                {"name": "patient/AllergyIntolerance.rs"},
             ]
         }
     }
@@ -55,6 +60,31 @@ mcp.tool(
         "and returns ranked candidate diseases with similarity scores."
     ),
 )(match_rare_diseases)
+
+mcp.tool(
+    name="AnalyzeLabTrends",
+    description=(
+        "Detects progressive and persistent lab abnormalities over time in a patient's "
+        "FHIR observation history. Groups by test, sorts by date, and identifies worsening "
+        "trends and multi-year persistent abnormalities that single readings miss."
+    ),
+)(analyze_lab_trends)
+
+mcp.tool(
+    name="EnrichHPOTerms",
+    description=(
+        "Enriches extracted HPO phenotype terms with official definitions, synonyms, "
+        "and clinical context from the Human Phenotype Ontology at hpo.jax.org."
+    ),
+)(enrich_hpo_terms)
+
+mcp.tool(
+    name="GetDiseaseGenes",
+    description=(
+        "Looks up causal and associated genes for top rare disease candidates via "
+        "Monarch Initiative and NCBI. Returns gene symbols to guide targeted genetic panel ordering."
+    ),
+)(get_disease_genes)
 
 mcp.tool(
     name="SearchPubMedLiterature",
